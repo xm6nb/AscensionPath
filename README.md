@@ -136,7 +136,7 @@ go build main.go
 
   **Docker compose**项目的压缩包就比较自由了，只需要上传ZIP压缩包即可。系统会自动解压到`./storeate`目录下并自动寻找该目录下所有的`docker-compose.yml`文件进行加载，`docker-compose.yml`文件在的目录名会自动作为漏洞环境的名称。在上传的时候要注意多次上传ZIP压缩包内容的相对路径最好别相同防止覆盖。
 
-  系统并没有对ZIP进行任何限制，你甚至可以将**Volhub**项目打包上传。
+  系统并没有对ZIP进行任何限制，你甚至可以将**Vulhub**项目打包上传。
 
 ### Pull image
 
