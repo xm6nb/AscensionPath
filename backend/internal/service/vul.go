@@ -565,6 +565,11 @@ func (v *VulService) CreateVulInstance(userID uint, vulEnvID uint) (*VulInstance
 		return nil, fmt.Errorf("余额不足")
 	}
 
+	// 扣除用户余额
+	if err = model.UpdateUserScore(userID, user.Score-VulEnv.Cost); err != nil {
+		return nil, fmt.Errorf("扣除余额失败: %v", err)
+	}
+
 	// 检查用户是否已经有该环境的实例
 	instance, err := model.GetVulInstanceBy2ID(userID, vulEnvID)
 	if err == nil && instance.Status == 1 { // 1 表示运行中

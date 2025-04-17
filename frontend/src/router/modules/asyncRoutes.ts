@@ -86,7 +86,7 @@ export const asyncRoutes: MenuListType[] = [
         component: RoutesAlias.Account,
         meta: {
           title: 'menus.user.account',
-          keepAlive: true,
+          keepAlive: false,
           roles: ['admin']
         }
       },

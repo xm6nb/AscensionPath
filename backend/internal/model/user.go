@@ -57,6 +57,13 @@ func DeleteUser(id uint) error {
 	return DB.Delete(&User{}, id).Error
 }
 
+// UpdateUserScore 更新用户积分
+func UpdateUserScore(id uint, score float64) error {
+	return DB.Model(&User{}).
+		Where("id =?", id).
+		Update("score", score).Error
+}
+
 // UpdatePassword 更新密码
 func UpdatePassword(id uint, newPassword string) error {
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
