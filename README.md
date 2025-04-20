@@ -1,4 +1,4 @@
-# AscensionPath
+# AscensionPath 漏洞环境管理系统
 
 ![Vue3](https://img.shields.io/badge/Vue-3.3-green)	![Golang](https://img.shields.io/badge/Go-1.20+-blue)
 
@@ -15,16 +15,19 @@
 - **环境管理**
 
   ✅ 镜像批量上传  ✅ 容器编排  ✅ 端口映射  ✅ 自动回收
+
 - **权限控制**
 
   🔒 RBAC权限模型  🔒 JWT认证  🔒 操作审计
 
   👨💻 普通用户环境隔离  👨💻 Admin全局管理
+
 - **开发支持**
 
   🛠️ Docker API集成  🛠️ Docker Compose多环境部署  🛠️ 端口智能映射
 
   📊 资源消耗统计  📊 实验时长分析
+
 - **安全机制**
   🔐 文件上传验证  🔐 容器沙箱隔离  🔐 路径穿越防护
   🔐 会话加密     🔐 操作日志追踪
@@ -141,7 +144,7 @@ go build main.go
 
 ### Pull image
 
-  拉取镜像与系统默认的docker源有关，由于国内的网络条件，请注意调整网络环境。
+  拉取镜像与系统默认的docker源有关，由于国内的网络条件，请注意调整网络网络环境。
 
 ### 创建一个实例
 

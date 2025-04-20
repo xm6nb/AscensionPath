@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -317,7 +318,6 @@ func GetImagesFromCompose(composePath string) ([]string, error) {
 
 // 使用 compose-go 解析并部署 Docker Compose 文件
 func CreateFromCompose(composePath, stackName string, ports *map[string]string) error {
-
 	labels := map[string]string{
 		"com.docker.compose.project": stackName,
 		"com.docker.compose.oneoff":  "False",
@@ -377,7 +377,7 @@ func CreateFromCompose(composePath, stackName string, ports *map[string]string) 
 				allDepsReady := true
 				// 检查依赖服务是否已部署
 				for dep := range service.DependsOn {
-					if !isServiceDeployed(project, dep) {
+					if !isServiceDeployed(project, dep, stackName) {
 						// 依赖服务未部署
 						allDepsReady = false
 						break
@@ -385,7 +385,7 @@ func CreateFromCompose(composePath, stackName string, ports *map[string]string) 
 				}
 
 				if allDepsReady {
-					if !isServiceDeployed(project, service.Name) {
+					if !isServiceDeployed(project, service.Name, stackName) {
 						if err := deployService(service, networkID, composePath, stackName, ports); err != nil {
 							return err
 						}
@@ -403,7 +403,7 @@ func CreateFromCompose(composePath, stackName string, ports *map[string]string) 
 
 	// 检查是否有未部署的服务
 	for _, service := range project.Services {
-		if !isServiceDeployed(project, service.Name) {
+		if !isServiceDeployed(project, service.Name, stackName) {
 			return fmt.Errorf("服务 %s 无法部署，可能存在循环依赖或未满足的依赖", service.Name)
 		}
 	}
@@ -441,6 +441,21 @@ func PortMapToPortSet(portMap nat.PortMap) nat.PortSet {
 	return portSet
 }
 
+// 获取重启策略（新增函数）
+func getRestartPolicy(deploy *types.DeployConfig) string {
+	if deploy != nil && deploy.RestartPolicy != nil {
+		switch deploy.RestartPolicy.Condition {
+		case "any":
+			return "always"
+		case "none":
+			return "no"
+		default:
+			return deploy.RestartPolicy.Condition
+		}
+	}
+	return "" // 默认不设置重启策略
+}
+
 // deployService 根据 compose 文件创建容器
 func deployService(service types.ServiceConfig, networkID string, composePath string, stackName string, ports *map[string]string) error {
 	// 检查并拉取镜像
@@ -469,10 +484,62 @@ func deployService(service types.ServiceConfig, networkID string, composePath st
 		Image: service.Image,
 		Env:   convertMappingToSlice(service.Environment),
 		Labels: map[string]string{
-			"com.docker.compose.project": stackName, // 使用规范化后的名称
+			"com.docker.compose.project": stackName,
 			"com.docker.compose.service": service.Name,
 			"com.docker.compose.oneoff":  "False",
 		},
+	}
+
+	// 添加用户配置（新增）
+	if service.User != "" {
+		containerConfig.User = service.User
+	}
+
+	// 添加健康检查（新增）
+	if service.HealthCheck != nil {
+		containerConfig.Healthcheck = &container.HealthConfig{
+			Test:     service.HealthCheck.Test,
+			Interval: time.Duration(*service.HealthCheck.Interval),
+			Timeout:  time.Duration(*service.HealthCheck.Timeout),
+			// 由于 service.HealthCheck.Retries 是 *uint64 类型，而 Retries 需要 int 类型，
+			// 这里先检查指针是否为 nil，若不为 nil 则将其值转换为 int 类型。
+			Retries:     int(*service.HealthCheck.Retries),
+			StartPeriod: time.Duration(*service.HealthCheck.StartPeriod),
+		}
+	}
+
+	// 添加entrypoint配置
+	if service.Entrypoint != nil {
+		containerConfig.Entrypoint = []string(service.Entrypoint)
+	}
+
+	// 添加工作目录配置
+	if service.WorkingDir != "" {
+		containerConfig.WorkingDir = service.WorkingDir
+	}
+
+	// 构建主机配置
+	hostConfig := &container.HostConfig{
+		// 添加重启策略（新增）
+		RestartPolicy: container.RestartPolicy{
+			Name: container.RestartPolicyMode(getRestartPolicy(service.Deploy)),
+		},
+	}
+
+	// 添加资源限制（新增）
+	if service.Deploy != nil {
+		// 由于 service.Deploy.Resources 是具体类型，不能直接和 nil 比较，
+		// 这里通过检查其字段是否为零值来判断是否为空
+		resources := service.Deploy.Resources
+		if !(resources.Limits.NanoCPUs == 0 && resources.Limits.MemoryBytes == 0 &&
+			resources.Reservations.NanoCPUs == 0 && resources.Reservations.MemoryBytes == 0) {
+			resources := service.Deploy.Resources
+			hostConfig.Resources = container.Resources{
+				CPUQuota:  int64(resources.Limits.NanoCPUs * 1e6),
+				CPUShares: int64(resources.Limits.NanoCPUs / 1e6),
+				Memory:    int64(resources.Limits.MemoryBytes),
+			}
+		}
 	}
 
 	// 添加command配置
@@ -485,22 +552,43 @@ func deployService(service types.ServiceConfig, networkID string, composePath st
 		containerConfig.Cmd = cmdSlice
 	}
 
-	// 构建主机配置
-	hostConfig := &container.HostConfig{}
-
-	// 添加卷挂载
+	// 在卷挂载处理部分增加跨平台支持
 	if len(service.Volumes) > 0 {
 		mounts := make([]mount.Mount, 0, len(service.Volumes))
 		for _, vol := range service.Volumes {
-			// 处理相对路径，转换为绝对路径
+			// 获取基于compose文件的绝对路径
 			source := vol.Source
 			if !filepath.IsAbs(source) {
-				source = filepath.Join(filepath.Dir(composePath), source)
+				// 获取compose文件所在目录的绝对路径
+				composeAbsDir, err := filepath.Abs(filepath.Dir(composePath))
+				if err != nil {
+					return fmt.Errorf("获取绝对路径失败: %v", err)
+				}
+				// 跨平台路径拼接
+				source = filepath.Join(composeAbsDir, source)
 			}
+
+			// 统一转换为Docker引擎兼容的路径格式
+			source = filepath.ToSlash(filepath.Clean(source))
+
+			// 平台特定校验
+			if runtime.GOOS == "windows" {
+				// Windows盘符校验
+				if len(source) < 2 || source[1] != ':' {
+					return fmt.Errorf("Windows路径必须包含盘符，请使用绝对路径。错误路径: %s", source)
+				}
+				source = strings.ReplaceAll(source, `\`, `/`)
+			} else {
+				// Linux绝对路径校验
+				if !strings.HasPrefix(source, "/") {
+					return fmt.Errorf("Linux路径必须是绝对路径。错误路径: %s", source)
+				}
+			}
+
 			mounts = append(mounts, mount.Mount{
 				Type:   mount.TypeBind,
 				Source: source,
-				Target: vol.Target,
+				Target: filepath.ToSlash(vol.Target), // 容器内部始终使用Linux路径
 			})
 		}
 		hostConfig.Mounts = mounts
@@ -555,7 +643,7 @@ func deployService(service types.ServiceConfig, networkID string, composePath st
 		hostConfig,
 		networkingConfig, // 使用包含别名的网络配置
 		nil,
-		service.Name,
+		fmt.Sprintf("%s-%s", stackName, service.Name), // 添加堆栈名前缀
 	)
 	if err != nil {
 		middleware.SugarLogger.Errorf("创建容器 %s 失败: %v", service.Name, err)
@@ -745,7 +833,8 @@ func RemoveContainer(containerID string, force bool) error {
 	}
 
 	options := container.RemoveOptions{
-		Force: force, // 是否强制删除运行中的容器
+		RemoveVolumes: true,  // 删除容器关联的卷
+		Force:         force, // 是否强制删除运行中的容器
 	}
 
 	if err := cli.ContainerRemove(context.Background(), containerID, options); err != nil {
@@ -793,16 +882,17 @@ func normalizeProjectName(name string) string {
 
 // 检查服务是否已部署
 // 检查服务是否已部署（只要存在容器就返回true，不检查运行状态）
-func isServiceDeployed(_ *types.Project, serviceName string) bool {
+func isServiceDeployed(_ *types.Project, serviceName string, stackName string) bool {
 	cli, err := getDockerClient()
 	if err != nil {
 		return false
 	}
 
 	containers, err := cli.ContainerList(context.Background(), container.ListOptions{
-		All: true, // 包含所有状态的容器
+		All: true,
 		Filters: filters.NewArgs(
 			filters.Arg("label", fmt.Sprintf("com.docker.compose.service=%s", serviceName)),
+			filters.Arg("label", fmt.Sprintf("com.docker.compose.project=%s", stackName)), // 新增项目过滤
 		),
 	})
 

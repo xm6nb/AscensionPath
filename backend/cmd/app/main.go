@@ -36,8 +36,12 @@ func main() {
 	// 6. 设置嵌入的静态文件服务
 	setupEmbeddedStaticFiles(r)
 
+	println("服务器已启动，监听端口：" + *port)
 	// 7. 启动服务
-	r.Run(":" + *port)
+	err := r.Run(":" + *port)
+	if err != nil {
+		panic("无法启动服务器: " + err.Error())
+	}
 }
 
 //go:embed dist/*

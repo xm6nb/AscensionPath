@@ -615,6 +615,7 @@ func (v *VulService) CreateVulInstance(userID uint, vulEnvID uint) (*VulInstance
 		stackName := normalizeProjectName(utils.MD5Encode(string(user.ID) + VulEnv.EnvName))
 		err = CreateFromCompose(VulEnv.BaseCompose, stackName, &ports)
 		if err != nil {
+			RemoveStackByName(stackName)
 			return nil, fmt.Errorf("启动docker compose 环境失败: %v", err)
 		}
 		newVulInstance.StackName = stackName

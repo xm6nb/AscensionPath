@@ -25,6 +25,7 @@ Desktop.ini
 # 测试相关
 coverage/
 .nyc_output/
+backend/test/*
 
 # 编辑器目录和文件
 .idea

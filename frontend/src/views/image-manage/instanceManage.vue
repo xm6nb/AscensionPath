@@ -16,7 +16,7 @@
             <form-input label="开发语言" prop="devLanguage" v-model="searchForm.devLanguage" />
           </el-row>
           <el-row :gutter="20">
-            <form-input label="漏洞环境名" prop="name" v-model="searchForm.envName" />
+            <form-input label="场景名称" prop="name" v-model="searchForm.envName" />
             <form-input label="数据库" prop="devDatabase" v-model="searchForm.devDatabase" />
             <form-input label="开发框架" prop="devMiddleware" v-model="searchForm.devMiddleware" />
           </el-row>
@@ -96,6 +96,25 @@
         {{ formatDate(scope.row.expire_time) }}
       </el-table-column>
       <el-table-column label="场景开销" prop="cost" v-if="columns[3].show" width="100px">
+      </el-table-column>
+      <el-table-column #default="scope" label="端口映射" v-if="columns[3].show" width="100px">
+        <el-tooltip placement="top" effect="light">
+          <template #content>
+            <div style="max-width: 480px"
+              ><span style="font-size: small">映射地址</span>
+              <hr />
+              <el-link
+                type="primary"
+                v-for="link in convertPortToLink(scope.row.ports)"
+                :href="link"
+                target="_blank"
+                style="margin-right: 10px"
+                >{{ link }}</el-link
+              >
+            </div>
+          </template>
+          {{ convertPortToLink(scope.row.ports)[0].substring(0, 7) + '...' }}
+        </el-tooltip>
       </el-table-column>
       <el-table-column label="漏洞类型" v-if="columns[3].show" width="110px">
         <template #default="scope">
@@ -277,6 +296,7 @@
   // 初始化时获取用户列表
   const init = () => {
     getInstances().then((data) => {
+      console.log(data)
       imageData.value = data
       updateTableData()
     })
@@ -375,6 +395,49 @@
         init()
       })
       .catch((err) => {})
+  }
+
+  const convertPortToLink = (ports: string[]) => {
+    let out = []
+    if (ports && ports.length > 0) {
+      const host = window.location.hostname
+      try {
+        // 声明类型
+        interface PortMap {
+          [containerPort: string]: string
+        }
+
+        // 新方案：智能合并所有JSON片段
+        const portMap = ports.reduce((acc: PortMap, str: string) => {
+          // 1. 移除字符串首尾的冗余字符
+          const cleanedStr = str.replace(/^[\s"{}\\]*|[\s"{}\\]*$/g, '')
+
+          // 2. 提取键值对
+          const pairs = cleanedStr.split(',').filter(Boolean)
+
+          // 3. 合并到结果对象
+          pairs.forEach((pair: string) => {
+            const [key, value] = pair.split(':').map((s: string) => s.replace(/^"|"$/g, '').trim())
+            if (key && value) {
+              acc[key] = value
+            }
+          })
+          return acc
+        }, {} as PortMap) // 初始化空对象并断言类型
+
+        // 生成链接
+        for (const [containerPort, hostPort] of Object.entries(portMap)) {
+          out.push(`http://${host}:${hostPort}# 来自容器内端口:${containerPort}`)
+          out.push(`https://${host}:${hostPort}# 来自容器内端口:${containerPort}`)
+        }
+      } catch (e) {
+        console.error('解析端口失败:', e)
+      }
+    }
+    if (out.length === 0) {
+      out.push('未检测到该镜像的映射端口，故暂无访问地址')
+    }
+    return out
   }
 </script>
 
