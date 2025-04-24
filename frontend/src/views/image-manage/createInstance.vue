@@ -34,7 +34,14 @@
       </div>
     </div>
 
-    <div class="list">
+    <div
+      class="list custom-loading-svg"
+      v-loading="isLoading"
+      :element-loading-svg="svg"
+      element-loading-text="加载中..."
+      element-loading-svg-view-box="-10, -10, 50, 50"
+      style="min-height: 500px;"
+    >
       <div class="offset">
         <div
           class="item"
