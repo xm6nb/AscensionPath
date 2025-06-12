@@ -154,7 +154,8 @@ func CreateVulEnv(c *gin.Context) {
 // 删除创建的漏洞环境
 func DeleteVulEnv(c *gin.Context) {
 	var req utils.Message[struct {
-		VulEnvID uint `json:"vul_env_id"`
+		VulEnvID      uint `json:"vul_env_id"`
+		IsDeleteImage bool `json:"is_delete_image"`
 	}]
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -170,7 +171,7 @@ func DeleteVulEnv(c *gin.Context) {
 
 	middleware.SugarLogger.Infof("用户: %s 请求删除环境: %d", userService.Username, req.Data.VulEnvID)
 	vul := service.VulService{}
-	if err := vul.DeleteVulEnv(req.Data.VulEnvID); err != nil {
+	if err := vul.DeleteVulEnv(req.Data.VulEnvID, req.Data.IsDeleteImage); err != nil {
 		c.JSON(http.StatusInternalServerError, utils.FailResult(utils.CodeInternalError, err.Error()))
 		middleware.SugarLogger.Errorf("用户: %s 删除环境 %d 失败: %s", userService.Username, req.Data.VulEnvID, err.Error())
 		return

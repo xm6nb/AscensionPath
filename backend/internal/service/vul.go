@@ -412,19 +412,38 @@ func (v *VulService) CreateVulEnv(vulEnv *VulEnv, conn *websocket.Conn) error {
 }
 
 // 删除漏洞环境
-func (v *VulService) DeleteVulEnv(EnvID uint) error {
+func (v *VulService) DeleteVulEnv(EnvID uint, isDeleteImage bool) error {
 	// 先删除实例
 	err := v.StopVulInstanceByVulEnvID(EnvID)
 	if err != nil {
 		return err
 	}
 
-	// 删除数据库记录
+	// 删除实例数据表记录
 	if err := model.DeleteVulInstanceByVulEnvID(EnvID); err != nil && err != gorm.ErrRecordNotFound {
 		return err
 	}
 
-	// 删除环境
+	// 如果需要删除镜像 先获取漏洞环境
+	env, err := model.GetVulEnvByID(EnvID)
+	if err != nil {
+		return err
+	}
+
+	if isDeleteImage {
+		if env.BaseCompose != "" {
+			// 删除镜像
+			if err = DeleteComposeImages(env.BaseCompose); err != nil {
+				return err
+			}
+		} else {
+			if err = DeleteImage(env.BaseImage); err != nil {
+				return err
+			}
+		}
+	}
+
+	// 删除漏洞环境数据表记录
 	if err := model.DeleteVulEnv(EnvID); err != nil {
 		return err
 	}

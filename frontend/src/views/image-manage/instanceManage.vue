@@ -89,15 +89,15 @@
       <el-table-column
         label="过期时间"
         prop="expire_time"
-        v-if="columns[3].show"
+        v-if="columns[4].show"
         #default="scope"
         width="230px"
       >
         {{ formatDate(scope.row.expire_time) }}
       </el-table-column>
-      <el-table-column label="场景开销" prop="cost" v-if="columns[3].show" width="100px">
+      <el-table-column label="场景开销" prop="cost" v-if="columns[5].show" width="100px">
       </el-table-column>
-      <el-table-column #default="scope" label="端口映射" v-if="columns[3].show" width="100px">
+      <el-table-column #default="scope" label="端口映射" v-if="columns[6].show" width="100px">
         <el-tooltip placement="top" effect="light">
           <template #content>
             <div style="max-width: 480px"
@@ -116,7 +116,7 @@
           {{ convertPortToLink(scope.row.ports)[0].substring(0, 7) + '...' }}
         </el-tooltip>
       </el-table-column>
-      <el-table-column label="漏洞类型" v-if="columns[3].show" width="110px">
+      <el-table-column label="漏洞类型" v-if="columns[7].show" width="110px">
         <template #default="scope">
           <el-tag
             v-for="(type, index) in scope.row.degree.HoleType"
@@ -128,7 +128,7 @@
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="开发语言" v-if="columns[4].show" width="100px">
+      <el-table-column label="开发语言" v-if="columns[8].show" width="100px">
         <template #default="scope">
           <el-tag
             v-for="(type, index) in scope.row.degree.devLanguage"
@@ -140,7 +140,7 @@
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="开发数据库" v-if="columns[5].show" width="110px">
+      <el-table-column label="开发数据库" v-if="columns[9].show" width="110px">
         <template #default="scope">
           <el-tag
             v-for="(type, index) in scope.row.degree.devDatabase"
@@ -152,7 +152,7 @@
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="开发框架" v-if="columns[6].show" width="100px">
+      <el-table-column label="开发框架" v-if="columns[10].show" width="100px">
         <template #default="scope">
           <el-tag
             v-for="(type, index) in scope.row.degree.devClassify"
@@ -164,7 +164,7 @@
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="来源" prop="from" sortable v-if="columns[7].show" width="100px" />
+      <el-table-column label="来源" prop="from" sortable v-if="columns[11].show" width="100px" />
       <el-table-column fixed="right" label="操作" width="150px">
         <template #default="scope">
           <el-tooltip class="box-item" effect="dark" content="延长半小时" placement="bottom">
@@ -194,7 +194,6 @@
 
 <script setup lang="ts">
   import { FormInstance } from 'element-plus'
-  import { ElMessage } from 'element-plus'
   import api from '@/utils/http'
   import { BaseResult } from '@/types/axios'
   import { formatDate } from '@/utils/utils'
@@ -212,9 +211,13 @@
   const showSetting = ref(false)
 
   const columns = reactive([
-    { name: '漏洞名称', show: true },
+    { name: '实例信息', show: true },
     { name: '评分', show: true },
     { name: '镜像描述', show: true },
+    { name: '开启时间', show: true },
+    { name: '过期时间', show: true },
+    { name: '场景开销', show: true },
+    { name: '端口映射', show: true },
     { name: '漏洞类型', show: true },
     { name: '开发语言', show: true },
     { name: '开发数据库', show: true },

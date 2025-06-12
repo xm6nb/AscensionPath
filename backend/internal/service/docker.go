@@ -139,6 +139,30 @@ func shortenID(id string) string {
 	return id
 }
 
+// IsImageInUse 检查镜像是否被任何容器使用
+func IsImageInUse(imageID string) (bool, error) {
+	cli, err := getDockerClient()
+	if err != nil {
+		return false, err
+	}
+
+	containers, err := cli.ContainerList(context.Background(), container.ListOptions{All: true})
+	if err != nil {
+		return false, fmt.Errorf("列出容器失败: %v", err)
+	}
+
+	for _, c := range containers {
+		// 检查容器使用的镜像ID是否与传入的imageID匹配
+		// 或者检查容器使用的镜像名称是否与传入的imageID（可能是镜像名称）匹配
+		// Docker 容器的 Image 字段通常是镜像名称:tag，ImageID 是镜像的完整ID
+		// 所以需要同时检查这两个字段
+		if c.ImageID == imageID || c.Image == imageID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // 定义 convertMappingToSlice 函数，将 types.MappingWithEquals 类型转换为 []string 类型
 func convertMappingToSlice(mapping types.MappingWithEquals) []string {
 	var result []string
@@ -269,6 +293,38 @@ func PullImage(ctx context.Context, imageName string, conn *websocket.Conn) erro
 	}
 }
 
+// DeleteImage 删除Docker镜像
+func DeleteImage(imageName string) error {
+	cli, err := getDockerClient()
+	if err != nil {
+		return err
+	}
+
+	// 检查镜像是否存在
+	if !ImageExists(imageName) {
+		return fmt.Errorf("镜像 %s 不存在", imageName)
+	}
+
+	// 检查镜像是否被使用
+	inUse, err := IsImageInUse(imageName)
+	if err != nil {
+		return fmt.Errorf("检查镜像 %s 是否被使用失败: %v", imageName, err)
+	}
+
+	if inUse {
+		return fmt.Errorf("镜像 %s 正在被使用，无法删除", imageName)
+	}
+
+	// 尝试删除镜像
+	_, err = cli.ImageRemove(context.Background(), imageName, image.RemoveOptions{Force: false, PruneChildren: true})
+	if err != nil {
+		return fmt.Errorf("删除镜像 %s 失败: %v", imageName, err)
+	}
+
+	middleware.SugarLogger.Infof("成功删除镜像: %s", imageName)
+	return nil
+}
+
 // 新增函数：从docker compose文件中解析需要拉取的镜像列表
 func GetImagesFromCompose(composePath string) ([]string, error) {
 	// 读取compose文件内容
@@ -314,6 +370,44 @@ func GetImagesFromCompose(composePath string) ([]string, error) {
 	}
 
 	return images, nil
+}
+
+// 删除docker compose文件中所有的依赖镜像
+func DeleteComposeImages(composePath string) error {
+	cli, err := getDockerClient()
+	if err != nil {
+		return err
+	}
+
+	imagesToDelete, err := GetImagesFromCompose(composePath)
+	if err != nil {
+		return fmt.Errorf("从 compose 文件获取镜像列表失败: %v", err)
+	}
+
+	var lastError error
+	for _, img := range imagesToDelete {
+		// 检查镜像是否被其他容器使用
+		inUse, err := IsImageInUse(img)
+		if err != nil {
+			middleware.SugarLogger.Errorf("检查镜像 %s 是否被使用失败: %v", img, err)
+			lastError = err
+			continue
+		}
+
+		if inUse {
+			middleware.SugarLogger.Infof("镜像 %s 正在被使用，跳过删除", img)
+			continue
+		}
+
+		// 尝试删除镜像
+		_, err = cli.ImageRemove(context.Background(), img, image.RemoveOptions{Force: false, PruneChildren: true})
+		if err != nil {
+			middleware.SugarLogger.Errorf("删除镜像 %s 失败: %v", img, err)
+			lastError = err
+		}
+	}
+
+	return lastError
 }
 
 // 使用 compose-go 解析并部署 Docker Compose 文件
