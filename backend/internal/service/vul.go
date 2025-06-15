@@ -19,7 +19,13 @@ import (
 )
 
 func init() {
+	// 启动定时监控过期实例
 	StartMonitorExpiredInstances()
+	// 获取所有已经创建的漏洞环境依赖镜像
+	go func() {
+		time.Sleep(1 * time.Second) // 等待数据库加载
+		GetDependentImages()
+	}()
 }
 
 type VulService struct{}
@@ -369,6 +375,10 @@ func (v *VulService) CreateVulEnv(vulEnv *VulEnv, conn *websocket.Conn) error {
 		if ok := utils.IsPathExist(vulEnv.Base_compose); !ok {
 			return fmt.Errorf("文件不存在")
 		}
+		// 查看是否存在需要构建的镜像环境
+		if err := CheckAndBuildImages(ctx, vulEnv.Base_compose, conn); err != nil {
+			return err
+		}
 		// 读取需要拉取的镜像
 		images, err := GetImagesFromCompose(vulEnv.Base_compose)
 		if err != nil {
@@ -378,6 +388,7 @@ func (v *VulService) CreateVulEnv(vulEnv *VulEnv, conn *websocket.Conn) error {
 		for _, image := range images {
 			if ok := ImageExists(image); !ok {
 				if err := PullImage(ctx, image, conn); err != nil {
+					DeleteComposeImages(vulEnv.Base_compose)
 					return err
 				}
 			}
@@ -408,6 +419,9 @@ func (v *VulService) CreateVulEnv(vulEnv *VulEnv, conn *websocket.Conn) error {
 	if err := model.CreateVulEnv(&newVul); err != nil {
 		return fmt.Errorf("创建失败: %v", err)
 	}
+
+	// 更新依赖列表
+	GetDependentImages()
 	return nil
 }
 
@@ -447,6 +461,10 @@ func (v *VulService) DeleteVulEnv(EnvID uint, isDeleteImage bool) error {
 	if err := model.DeleteVulEnv(EnvID); err != nil {
 		return err
 	}
+
+	// 更新依赖列表
+	GetDependentImages()
+
 	return nil
 }
 
@@ -789,4 +807,36 @@ func (v *VulService) checkAndCleanExpiredInstances() error {
 // 延长实例时间
 func (v *VulService) ExtendExpireTime(id uint) error {
 	return model.ExtendExpireTime(id)
+}
+
+// 全局依赖镜像列表
+var DependentImages map[string]int = make(map[string]int)
+
+// 获取所有创建的漏洞环境依赖镜像
+func GetDependentImages() error {
+	DependentImages = make(map[string]int)
+	var vulEnvs []model.VulEnv
+	vulEnvs, err := model.GetAllVulEnvsNoPage()
+	if err != nil {
+		return err
+	}
+	for _, vulEnv := range vulEnvs {
+		if vulEnv.BaseImage != "" {
+			DependentImages[vulEnv.BaseImage]++
+		} else {
+			images, err := GetImagesFromCompose(vulEnv.BaseCompose)
+			if err != nil {
+				return fmt.Errorf("从 compose 文件获取镜像列表失败: %v", err)
+			}
+			for _, image := range images {
+				// 检查是否存在冒号分隔符
+				if !strings.Contains(image, ":") {
+					// 添加默认版本号
+					image = image + ":latest"
+				}
+				DependentImages[image]++
+			}
+		}
+	}
+	return nil
 }

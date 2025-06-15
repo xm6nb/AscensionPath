@@ -4,6 +4,9 @@ import (
 	"AscensionPath/config"
 	"AscensionPath/internal/middleware"
 	"AscensionPath/internal/utils"
+	"archive/tar"
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -22,6 +25,7 @@ import (
 
 	"github.com/compose-spec/compose-go/v2/loader"
 	"github.com/compose-spec/compose-go/v2/types"
+	types2 "github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
@@ -302,7 +306,7 @@ func DeleteImage(imageName string) error {
 
 	// 检查镜像是否存在
 	if !ImageExists(imageName) {
-		return fmt.Errorf("镜像 %s 不存在", imageName)
+		return nil
 	}
 
 	// 检查镜像是否被使用
@@ -315,13 +319,21 @@ func DeleteImage(imageName string) error {
 		return fmt.Errorf("镜像 %s 正在被使用，无法删除", imageName)
 	}
 
-	// 尝试删除镜像
-	_, err = cli.ImageRemove(context.Background(), imageName, image.RemoveOptions{Force: false, PruneChildren: true})
-	if err != nil {
-		return fmt.Errorf("删除镜像 %s 失败: %v", imageName, err)
+	// 是否被依赖
+	if DependentImages[imageName] > 1 {
+		middleware.SugarLogger.Infof("镜像 %s 被依赖，无需删除", imageName)
+		DependentImages[imageName]--
+	} else {
+		// 尝试删除镜像
+		_, err = cli.ImageRemove(context.Background(), imageName, image.RemoveOptions{Force: false, PruneChildren: true})
+		if err != nil {
+			return fmt.Errorf("删除镜像 %s 失败: %v", imageName, err)
+		}
+		// 删除成功后，从依赖列表中移除
+		delete(DependentImages, imageName)
+		middleware.SugarLogger.Infof("成功删除镜像: %s", imageName)
 	}
 
-	middleware.SugarLogger.Infof("成功删除镜像: %s", imageName)
 	return nil
 }
 
@@ -367,9 +379,44 @@ func GetImagesFromCompose(composePath string) ([]string, error) {
 		if service.Image != "" {
 			images = append(images, service.Image)
 		}
+		// 查看是否有动态构建的镜像
+		if service.Build != nil {
+			// 动态构建镜像，需要根据上下文解析
+			// 这里简单使用服务名作为镜像标签
+			imageName := fmt.Sprintf("%s-%s", stackName, service.Name)
+			images = append(images, imageName)
+
+			// 读取Dockerfile内容
+			dockerfilePath := filepath.Join(filepath.Dir(composePath), service.Build.Context, service.Build.Dockerfile)
+			dfImages, err := GetDependenciesFromDockerfile(dockerfilePath)
+			if err == nil && len(dfImages) > 0 {
+				images = append(images, dfImages...)
+			}
+		}
 	}
 
 	return images, nil
+}
+
+// 从DockerFile获取依赖镜像
+func GetDependenciesFromDockerfile(dockerfilePath string) ([]string, error) {
+	result := []string{}
+	content, err := os.ReadFile(dockerfilePath)
+	if err != nil {
+		// 记录错误但不中断流程，因为可能有些服务没有Dockerfile或者路径错误
+		middleware.SugarLogger.Warnf("读取Dockerfile %s 失败: %v", dockerfilePath, err)
+	} else {
+		// 解析所有FROM指令
+		re := regexp.MustCompile(`(?im)^FROM\s+(\S+)(?:\s+AS\s+\S+)?\s*(?:#.*)?$`)
+		matches := re.FindAllStringSubmatch(string(content), -1)
+		for _, match := range matches {
+			if len(match) > 1 {
+				result = append(result, match[1]) // 添加所有基础镜像
+			}
+		}
+	}
+
+	return result, nil
 }
 
 // 删除docker compose文件中所有的依赖镜像
@@ -383,9 +430,19 @@ func DeleteComposeImages(composePath string) error {
 	if err != nil {
 		return fmt.Errorf("从 compose 文件获取镜像列表失败: %v", err)
 	}
-
 	var lastError error
 	for _, img := range imagesToDelete {
+		// 检查是否存在冒号分隔符
+		if !strings.Contains(img, ":") {
+			// 添加默认版本号
+			img = img + ":latest"
+		}
+
+		if !ImageExists(img) {
+			middleware.SugarLogger.Infof("镜像 %s 不存在，跳过删除", img)
+			continue
+		}
+
 		// 检查镜像是否被其他容器使用
 		inUse, err := IsImageInUse(img)
 		if err != nil {
@@ -399,11 +456,17 @@ func DeleteComposeImages(composePath string) error {
 			continue
 		}
 
-		// 尝试删除镜像
-		_, err = cli.ImageRemove(context.Background(), img, image.RemoveOptions{Force: false, PruneChildren: true})
-		if err != nil {
-			middleware.SugarLogger.Errorf("删除镜像 %s 失败: %v", img, err)
-			lastError = err
+		if DependentImages[img] <= 1 {
+			// 尝试删除镜像
+			_, err = cli.ImageRemove(context.Background(), img, image.RemoveOptions{Force: false, PruneChildren: true})
+			if err != nil {
+				middleware.SugarLogger.Errorf("删除镜像 %s 失败: %v", img, err)
+				lastError = err
+			} else {
+				delete(DependentImages, img)
+			}
+		} else {
+			DependentImages[img]--
 		}
 	}
 
@@ -559,18 +622,26 @@ func deployService(service types.ServiceConfig, networkID string, composePath st
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	_, err = cli.ImageInspect(context.Background(), service.Image)
-	if err != nil {
-		if client.IsErrNotFound(err) {
-			middleware.SugarLogger.Infof("镜像 %s 不存在，开始拉取...", service.Image)
-			if err = PullImage(ctx, service.Image, nil); err != nil {
-				middleware.SugarLogger.Errorf("拉取镜像 %s 失败: %v", service.Image, err)
+	if service.Build == nil {
+		_, err = cli.ImageInspect(context.Background(), service.Image)
+		if err != nil {
+			if client.IsErrNotFound(err) {
+				middleware.SugarLogger.Infof("镜像 %s 不存在，开始拉取...", service.Image)
+				if err = PullImage(ctx, service.Image, nil); err != nil {
+					middleware.SugarLogger.Errorf("拉取镜像 %s 失败: %v", service.Image, err)
+					return err
+				}
+			} else {
+				middleware.SugarLogger.Errorf("检查镜像 %s 失败: %v", service.Image, err)
 				return err
 			}
-		} else {
-			middleware.SugarLogger.Errorf("检查镜像 %s 失败: %v", service.Image, err)
-			return err
 		}
+	} else {
+		// 将镜像替换成已经建好的镜像
+		rawName := filepath.Base(filepath.Dir(composePath))
+		stackName := normalizeProjectName(rawName)
+		imageName := fmt.Sprintf("%s-%s", stackName, service.Name)
+		service.Image = imageName
 	}
 
 	// 构建容器配置（添加堆栈标签）
@@ -926,6 +997,14 @@ func RemoveContainer(containerID string, force bool) error {
 		return err
 	}
 
+	_, err = cli.ContainerInspect(context.Background(), containerID)
+	if err != nil {
+		if client.IsErrNotFound(err) {
+			// 容器不存在，直接返回
+			return nil
+		}
+	}
+
 	options := container.RemoveOptions{
 		RemoveVolumes: true,  // 删除容器关联的卷
 		Force:         force, // 是否强制删除运行中的容器
@@ -1117,4 +1196,287 @@ func RemoveStackByName(stackName string) error {
 
 	middleware.SugarLogger.Infof("成功删除堆栈 %s 的所有资源", stackName)
 	return nil
+}
+
+// 根据DockerFile动态创建镜像
+func BuildImageFromDockerfile(ctx context.Context, dockerfilePath, imageName string, conn *websocket.Conn) error {
+	cli, err := getDockerClient()
+	if err != nil {
+		return err
+	}
+
+	// 构建上下文路径为 Dockerfile 所在的目录（因为 dockerfilePath 已经是绝对路径）
+	buildCtxPath := filepath.Dir(dockerfilePath)
+
+	// 获取 Dockerfile 相对于构建上下文的路径
+	relDockerfilePath, err := filepath.Rel(buildCtxPath, dockerfilePath)
+	if err != nil {
+		return fmt.Errorf("获取 Dockerfile 相对路径失败: %w", err)
+	}
+
+	buildContext, err := createTarReader(buildCtxPath)
+	if err != nil {
+		return fmt.Errorf("创建构建上下文失败: %v", err)
+	}
+
+	// 构建选项
+	buildOptions := types2.ImageBuildOptions{
+		Dockerfile: relDockerfilePath, // Dockerfile 相对于构建上下文的路径
+		Tags:       []string{imageName},
+		Remove:     true,
+		Context:    buildContext,
+	}
+
+	// 执行镜像构建
+	buildResponse, err := cli.ImageBuild(ctx, buildContext, buildOptions)
+	if err != nil {
+		return fmt.Errorf("构建镜像失败: %v", err)
+	}
+	defer buildResponse.Body.Close()
+
+	// 读取构建输出
+	scanner := bufio.NewScanner(buildResponse.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if conn != nil {
+			// 发送构建日志到 WebSocket
+			var message struct {
+				Stream      string `json:"stream"`
+				ErrorDetail string `json:"errorDetail"`
+				Error       string `json:"error"`
+				Aux         struct {
+					ID string `json:"ID"`
+				} `json:"aux"`
+			}
+			err := json.Unmarshal([]byte(line), &message)
+			if err != nil {
+				middleware.SugarLogger.Errorf("解析构建日志失败: %v", err)
+				continue
+			}
+			msg := utils.Message[any]{
+				Code:    utils.CodeSuccess,
+				Message: "构建日志",
+				Data:    message,
+			}
+			if message.Error != "" {
+				msg.Code = utils.CodeInternalError
+				msg.Message = message.Error
+			}
+			err = conn.WriteJSON(msg)
+			if err != nil {
+				middleware.SugarLogger.Errorf("发送构建日志到 WebSocket 失败: %v", err)
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		middleware.SugarLogger.Errorf("读取构建输出失败: %v", err)
+		// 构建被取消
+		if err == context.Canceled {
+			// 查找所有容器
+			containers, err := cli.ContainerList(context.Background(), container.ListOptions{})
+			if err != nil {
+				middleware.SugarLogger.Errorf("查找容器失败: %v", err)
+			} else {
+				// 过滤出临时容器
+				images, err := GetDependenciesFromDockerfile(dockerfilePath)
+				imageIDs := []string{}
+				if err == nil && len(images) > 0 {
+					// 通过镜像名获取镜像ID
+					for _, image := range images {
+						imageID, err := GetImageIDByName(image)
+						if err != nil {
+							middleware.SugarLogger.Errorf("获取镜像ID失败: %v", err)
+							continue
+						}
+						imageIDs = append(imageIDs, imageID)
+					}
+					// 过滤出临时容器
+					for _, c := range containers {
+						for _, imageID := range imageIDs {
+							if c.ImageID == imageID {
+								removeOpts := container.RemoveOptions{
+									Force: true,
+								}
+								if err := cli.ContainerRemove(context.Background(), c.ID, removeOpts); err != nil {
+									middleware.SugarLogger.Errorf("删除容器失败: %v", err)
+								}
+							}
+						}
+					}
+					// 删除依赖的镜像
+					for _, imageName := range images {
+						if !strings.Contains(imageName, ":") {
+							// 添加默认版本号
+							imageName = imageName + ":latest"
+						}
+						if DependentImages[imageName] < 1 {
+							if _, err := cli.ImageRemove(context.Background(), imageName, image.RemoveOptions{
+								Force: true,
+							}); err != nil {
+								middleware.SugarLogger.Errorf("删除镜像失败: %v", err)
+							}
+						}
+					}
+				}
+			}
+			err = errors.New("构建镜像被取消")
+			return fmt.Errorf("构建 %s 镜像失败: %v", imageName, err)
+		}
+	}
+
+	middleware.SugarLogger.Infof("镜像 %s 构建成功", imageName)
+	return nil
+}
+
+// createTarReader 从给定目录路径创建tar归档文件
+// 并返回一个io.Reader
+func createTarReader(srcPath string) (io.Reader, error) {
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	defer tw.Close() // Ensure tar writer is closed
+
+	err := filepath.Walk(srcPath, func(file string, fi os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// 获取文件头信息
+		header, err := tar.FileInfoHeader(fi, file)
+		if err != nil {
+			return err
+		}
+
+		// 更新名称为相对于源路径的相对路径
+		relPath, err := filepath.Rel(srcPath, file)
+		if err != nil {
+			return err
+		}
+		// 确保使用正斜杠并处理根目录情况
+		if relPath == "." {
+			relPath = "" // 上下文根目录
+		}
+		header.Name = filepath.ToSlash(relPath)
+
+		// 对于目录，确保名称以斜杠结尾
+		if fi.IsDir() {
+			header.Name += "/"
+		}
+
+		if header.Name == "" { // 如果是根目录条目(".")则跳过
+			return nil
+		}
+
+		if err := tw.WriteHeader(header); err != nil {
+			return err
+		}
+
+		// 如果是普通文件，写入其内容
+		if fi.Mode().IsRegular() {
+			f, err := os.Open(file)
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+
+			if _, err := io.Copy(tw, f); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &buf, nil
+}
+
+// 检查docker compose中是否存在需要动态创建的镜像
+func CheckAndBuildImages(ctx context.Context, composePath string, conn *websocket.Conn) error {
+	composeData, err := os.ReadFile(composePath)
+	if err != nil {
+		return fmt.Errorf("读取compose文件失败: %v", err)
+	}
+
+	// 规范化项目名称
+	rawName := filepath.Base(filepath.Dir(composePath))
+	stackName := normalizeProjectName(rawName)
+
+	// 解析compose文件
+	project, err := loader.LoadWithContext(context.Background(),
+		types.ConfigDetails{
+			ConfigFiles: []types.ConfigFile{
+				{
+					Filename: composePath,
+					Content:  composeData,
+				},
+			},
+			Environment: map[string]string{
+				"COMPOSE_PROJECT_NAME": stackName,
+			},
+		},
+		func(o *loader.Options) {
+			o.ResolvePaths = true
+			o.SetProjectName(stackName, true)
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("加载compose文件失败: %v", err)
+	}
+
+	// 遍历所有服务
+	for name, service := range project.Services {
+		if service.Build != nil {
+			// 构建镜像
+			dockerfilePath := service.Build.Dockerfile
+			if dockerfilePath == "" {
+				dockerfilePath = "Dockerfile"
+			}
+
+			backendAbsDir, err := filepath.Abs(filepath.Dir(dockerfilePath))
+			if err != nil {
+				return fmt.Errorf("获取 compose 文件目录绝对路径失败: %v", err)
+			}
+
+			fullDockerfilePath := filepath.Join(backendAbsDir, filepath.Dir(composePath), service.Build.Context, dockerfilePath)
+			imageName := fmt.Sprintf("%s-%s", stackName, name)
+
+			err = BuildImageFromDockerfile(ctx, fullDockerfilePath, imageName, conn)
+			if err != nil {
+				return fmt.Errorf("为服务%s构建镜像失败: %v", name, err)
+			}
+
+			// 更新服务配置使用新构建的镜像
+			service.Image = imageName
+			project.Services[name] = service
+
+			middleware.SugarLogger.Infof("成功为服务 %s 构建镜像 %s ", imageName, name)
+		}
+	}
+
+	return nil
+}
+
+// 通过镜像名获取ID
+func GetImageIDByName(imageName string) (string, error) {
+	cli, err := getDockerClient()
+	if err != nil {
+		return "", err
+	}
+
+	images, err := cli.ImageList(context.Background(), image.ListOptions{
+		Filters: filters.NewArgs(
+			filters.Arg("reference", imageName),
+		),
+	})
+
+	if err != nil {
+		return "", err
+	}
+
+	if len(images) == 0 {
+		return "", fmt.Errorf("image %s not found", imageName)
+	}
+	return images[0].ID, nil
 }
